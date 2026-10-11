@@ -181,3 +181,65 @@ func TestSpaceProxyDoesNotChangeOtherModels(t *testing.T) {
 		}
 	}
 }
+
+func TestSpaceCompactionWithoutToolsUsesTextOnlyCompatibility(t *testing.T) {
+	t.Setenv("ZEN_SPACE_BUNNY_COMPAT", "1")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Tools      []ChatTool    `json:"tools"`
+			ToolChoice string        `json:"tool_choice"`
+			Messages   []ChatMessage `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		found := map[string]bool{}
+		for _, tool := range body.Tools {
+			found[tool.Function.Name] = true
+		}
+		if !strings.HasPrefix(r.UserAgent(), "opencode/") || !found["bash"] || !found["read"] {
+			w.WriteHeader(403)
+			fmt.Fprint(w, `{"error":"FreeTierError"}`)
+			return
+		}
+		if body.ToolChoice != "none" {
+			t.Error("compaction must not invoke tools")
+		}
+		for _, m := range body.Messages {
+			for _, c := range m.ToolCalls {
+				if c.Function.Name == "exec_command" {
+					t.Error("historical tool not translated")
+				}
+			}
+		}
+		fmt.Fprint(w, `{"id":"summary","choices":[{"message":{"content":"Progress: tests passed. Next: continue review."}}]}`)
+	}))
+	defer upstream.Close()
+	cfg := LoadConfig()
+	cfg.Upstream = upstream.URL
+	gateway := httptest.NewServer(handleResponses(cfg))
+	defer gateway.Close()
+	req := `{"model":"space-bunny-free","tools":[],"input":[{"type":"function_call","call_id":"old","name":"exec_command","arguments":"{\"cmd\":\"git status\"}"},{"type":"function_call_output","call_id":"old","output":"clean"},{"type":"message","role":"user","content":[{"type":"input_text","text":"You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary."}]}]}`
+	resp, err := http.Post(gateway.URL, "application/json", strings.NewReader(req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !strings.Contains(string(b), "Progress: tests passed") {
+		t.Fatalf("compaction failed: %d %s", resp.StatusCode, b)
+	}
+}
+
+func TestSpaceCompactionRejectsUnexpectedToolCalls(t *testing.T) {
+	body := `{"id":"bad","choices":[{"message":{"tool_calls":[{"id":"bad","type":"function","function":{"name":"read","arguments":"{\"filePath\":\"/tmp/not-to-be-read\"}"}}]}}]}`
+	rec := httptest.NewRecorder()
+	responsesNonStreaming(rec, spaceResponseBody(io.NopCloser(strings.NewReader(body)), false, true), "space-bunny-free")
+	if rec.Code != 502 || strings.Contains(rec.Body.String(), `"type":"function_call"`) {
+		t.Fatalf("tool call escaped text-only compaction: %d %s", rec.Code, rec.Body.String())
+	}
+	stream := "data: {\"id\":\"bad\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"bad\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n"
+	rec = httptest.NewRecorder()
+	responsesStreaming(rec, spaceResponseBody(io.NopCloser(strings.NewReader(stream)), true, true), "space-bunny-free")
+	if !strings.Contains(rec.Body.String(), "response.failed") || strings.Contains(rec.Body.String(), "response.function_call_arguments") {
+		t.Fatalf("streamed tool escaped compaction: %s", rec.Body.String())
+	}
+}

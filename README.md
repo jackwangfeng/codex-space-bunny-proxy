@@ -57,11 +57,11 @@ The adapter is enabled only when all conditions hold:
 
 1. `ZEN_SPACE_BUNNY_COMPAT=1`.
 2. The requested model is `space-bunny-free`.
-3. Codex declares its actual `exec_command` function.
+3. Codex declares its actual `exec_command` function, or sends its standard tool-less context-checkpoint compaction request.
 
 It translates tool declarations, selected tool choice, assistant tool history, and returned tool arguments. Client metadata uses uniquely generated session/request identifiers; no captured user account or session IDs are shipped. Streaming text and reasoning pass through. Tool arguments are buffered until their upstream call is complete so they can be translated reliably.
 
-Other model requests keep the inherited upstream behavior. Without the flag, the new adapter is inactive. Requests without a Codex execution tool do not acquire dummy tools and may be rejected by the provider.
+Other model requests keep the inherited upstream behavior. Without the flag, the new adapter is inactive. For identified context-checkpoint compaction turns, the existing adapter declarations are sent with `tool_choice: "none"`; any returned tool call is rejected before it reaches Codex. This lets long conversations compact and resume while remaining text-only. Ordinary requests without a Codex execution tool still do not acquire dummy tools and may be rejected by the provider.
 
 ## Verification
 
@@ -70,7 +70,7 @@ go test -race ./...
 go vet ./...
 ```
 
-Tests cover real file reading with shell-sensitive filenames, split streaming tool arguments, history replay, explicit tool selection, client identifier shape, and model-specific outbound proxy isolation.
+Tests cover real file reading with shell-sensitive filenames, split streaming tool arguments, history replay, explicit tool selection, client identifier shape, model-specific outbound proxy isolation, tool-less history compaction, and rejection of unexpected tool calls during compaction.
 
 Live checks on two Linux hosts verified normal Codex startup, multi-turn file reading, code editing, and running a two-test fixture. The fixture had failing tests before the change and passed afterward. No genuine OpenCode worker was needed for those direct Codex checks.
 

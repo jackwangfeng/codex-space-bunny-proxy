@@ -54,6 +54,18 @@ func spaceToolChoice(raw json.RawMessage) json.RawMessage {
 	return raw
 }
 
+func spaceCompaction(messages []ChatMessage) bool {
+	if len(messages) == 0 {
+		return false
+	}
+	m := messages[len(messages)-1]
+	if m.Role != "user" {
+		return false
+	}
+	text := extractResponsesOutput(m.Content)
+	return strings.HasPrefix(strings.TrimSpace(text), "You are performing a CONTEXT CHECKPOINT COMPACTION.")
+}
+
 func renamedArgs(raw string, from, to string) string {
 	var args map[string]json.RawMessage
 	if json.Unmarshal([]byte(raw), &args) != nil {
@@ -165,7 +177,8 @@ func (c *spaceStreamCloser) Close() error {
 	return err
 }
 
-func spaceResponseBody(body io.ReadCloser, stream bool) io.ReadCloser {
+func spaceResponseBody(body io.ReadCloser, stream bool, textOnly ...bool) io.ReadCloser {
+	blockTools := len(textOnly) > 0 && textOnly[0]
 	if !stream {
 		var completion ChatCompletion
 		err := json.NewDecoder(body).Decode(&completion)
@@ -174,6 +187,9 @@ func spaceResponseBody(body io.ReadCloser, stream bool) io.ReadCloser {
 			return io.NopCloser(strings.NewReader(`{"error":"invalid upstream completion"}`))
 		}
 		for i := range completion.Choices {
+			if blockTools && len(completion.Choices[i].Message.ToolCalls) > 0 {
+				return io.NopCloser(strings.NewReader(`{"error":"tool call rejected during text-only compaction"}`))
+			}
 			for j, t := range completion.Choices[i].Message.ToolCalls {
 				converted, e := spaceToolResult(t)
 				if e != nil {
@@ -191,6 +207,9 @@ func spaceResponseBody(body io.ReadCloser, stream bool) io.ReadCloser {
 		err := iterateSSE(body, func(chunk streamChunk) error {
 			for i := range chunk.Choices {
 				choice := &chunk.Choices[i]
+				if blockTools && len(choice.Delta.ToolCalls) > 0 {
+					return fmt.Errorf("tool call rejected during text-only compaction")
+				}
 				for _, t := range choice.Delta.ToolCalls {
 					c := pending[t.Index]
 					c.Index = t.Index

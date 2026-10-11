@@ -35,11 +35,23 @@ type chatRequestOptions struct {
 
 func upstreamRequest(ctx context.Context, cfg Config, model string, messages []ChatMessage, stream bool, tools []ChatTool, opts chatRequestOptions) (*http.Response, error) {
 	compat := cfg.SpaceBunnyCompat && effectiveModel(cfg, model) == "space-bunny-free"
+	compact := compat && len(tools) == 0 && spaceCompaction(messages)
+	if compact {
+		tools = []ChatTool{{Type: "function", Function: ChatFunction{
+			Name: "exec_command", Description: "Codex shell execution adapter; disabled for this text-only compaction turn.",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"],"additionalProperties":false}`),
+		}}}
+	}
 	if compat {
 		messages, tools, compat = prepareSpaceTools(messages, tools)
 	}
 	if compat {
 		opts.ToolChoice = spaceToolChoice(opts.ToolChoice)
+	}
+	if compact {
+		opts.ToolChoice = json.RawMessage(`"none"`)
+		disabled := false
+		opts.ParallelToolCalls = &disabled
 	}
 	body := map[string]any{
 		"model":    effectiveModel(cfg, model),
@@ -87,7 +99,7 @@ func upstreamRequest(ctx context.Context, cfg Config, model string, messages []C
 
 	resp, err := executeUpstream(ctx, cfg, req, payload)
 	if err == nil && compat && resp.StatusCode == http.StatusOK {
-		resp.Body = spaceResponseBody(resp.Body, stream)
+		resp.Body = spaceResponseBody(resp.Body, stream, compact)
 	}
 	return resp, err
 }
